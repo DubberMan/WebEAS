@@ -1,0 +1,910 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebEAS - Emergency Alert System Endec</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;700&family=VT323&display=swap');
+        
+        body {
+            font-family: 'Roboto Mono', monospace;
+            background-color: #1a1a1a;
+            color: #e0e0e0;
+            overflow: hidden; /* Main container manages scroll */
+        }
+
+        .lcd-text {
+            font-family: 'VT323', monospace;
+            text-shadow: 0 0 5px rgba(0, 255, 0, 0.5);
+        }
+
+        .scroll-text {
+            white-space: nowrap;
+            animation: scroll-left 56s linear infinite;
+        }
+
+        @keyframes scroll-left {
+            0% { transform: translateX(100%); }
+            100% { transform: translateX(-100%); }
+        }
+
+        /* Scanlines for realism */
+        .scanlines {
+            background: linear-gradient(
+                to bottom,
+                rgba(255,255,255,0),
+                rgba(255,255,255,0) 50%,
+                rgba(0,0,0,0.2) 50%,
+                rgba(0,0,0,0.2)
+            );
+            background-size: 100% 4px;
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            pointer-events: none;
+            z-index: 10;
+        }
+
+        /* Display Mode Specifics */
+        .display-mode-body {
+            background-color: transparent; /* For OBS */
+        }
+        
+        .alert-crawl-container {
+            background: #cc0000;
+            color: white;
+            font-family: Arial, Helvetica, sans-serif;
+            font-weight: bold;
+            text-transform: uppercase;
+            border-top: 4px solid #ffcc00;
+            border-bottom: 4px solid #ffcc00;
+            box-shadow: 0 0 10px rgba(0,0,0,0.5);
+        }
+
+        .blink {
+            animation: blinker 1s linear infinite;
+        }
+        @keyframes blinker {
+            50% { opacity: 0; }
+        }
+    </style>
+</head>
+<body class="h-screen flex flex-col">
+
+    <!-- Mode Selector (Hidden if mode params exist) -->
+    <div id="setup-screen" class="fixed inset-0 bg-gray-900 z-50 flex items-center justify-center flex-col gap-4">
+        <h1 class="text-4xl font-bold text-white mb-8">WebEAS System</h1>
+        <div class="flex flex-col gap-4 items-center">
+            <div class="flex gap-4">
+                <button onclick="startEndec()" class="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded font-bold shadow-lg">
+                    Launch Controller (Endec)
+                </button>
+                <button onclick="startDisplay()" class="px-6 py-3 bg-green-600 hover:bg-green-700 text-white rounded font-bold shadow-lg">
+                    Launch Display Screen (OBS)
+                </button>
+            </div>
+            <div class="flex items-center gap-2">
+                <input type="checkbox" id="green-screen-toggle" class="w-5 h-5">
+                <label for="green-screen-toggle" class="text-white">Enable Green Screen Background (for OBS Chroma Key)</label>
+            </div>
+        </div>
+        <p class="text-gray-400 mt-4 max-w-md text-center">
+            The Controller generates alerts. The Display Screen receives them. Open the Display Screen in a separate window for OBS capture.
+            <br><span class="text-xs text-yellow-500 font-bold">NOTE: Both windows must be in the same browser (e.g., both in Chrome) to connect.</span>
+        </p>
+    </div>
+
+    <!-- CONTROLLER UI (ENDEC) -->
+    <div id="controller-ui" class="hidden h-full flex flex-col p-4 gap-4 max-w-6xl mx-auto w-full">
+        <!-- Header / Status -->
+        <header class="bg-gray-800 p-4 rounded border border-gray-700 flex justify-between items-center gap-4">
+            <div class="flex items-center gap-4">
+                <button onclick="exitToSetup()" class="bg-gray-700 hover:bg-gray-600 text-white px-3 py-2 rounded text-sm font-bold border border-gray-500 flex items-center gap-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+                    </svg>
+                    MENU
+                </button>
+                <div>
+                    <h2 class="text-2xl font-bold text-blue-400">EAS ENCODER/DECODER</h2>
+                    <div class="text-xs text-green-500 flex items-center gap-2">
+                        <span class="w-3 h-3 bg-green-500 rounded-full animate-pulse"></span> SYSTEM ONLINE
+                    </div>
+                </div>
+            </div>
+            <div class="flex items-center gap-4">
+                <button onclick="openDisplayPopup()" class="bg-purple-700 hover:bg-purple-600 text-white px-3 py-2 rounded text-sm font-bold border border-purple-500 flex items-center gap-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                    </svg>
+                    OPEN DISPLAY
+                </button>
+                <div class="text-right hidden sm:block">
+                    <div id="clock" class="text-xl font-mono text-yellow-400">00:00:00</div>
+                    <div class="text-xs text-gray-400">SOURCE: LOCAL/IPAWS</div>
+                </div>
+            </div>
+        </header>
+
+        <div class="flex-1 flex gap-4 min-h-0">
+            <!-- Left Panel: Composition -->
+            <section class="flex-1 bg-gray-800 p-4 rounded border border-gray-700 flex flex-col overflow-y-auto">
+                <h3 class="text-lg font-bold border-b border-gray-600 pb-2 mb-4">Alert Composition</h3>
+                
+                <div class="grid grid-cols-2 gap-4 mb-4">
+                    <div>
+                        <label class="block text-xs text-gray-400 mb-1">Originator (ORG)</label>
+                        <select id="org-select" class="w-full bg-gray-900 border border-gray-600 p-2 rounded">
+                            <option value="WXR">WXR (National Weather Service)</option>
+                            <option value="PEP">PEP (Primary Entry Point)</option>
+                            <option value="CIV">CIV (Civil Authorities)</option>
+                            <option value="EAS">EAS (Broadcast Station)</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-xs text-gray-400 mb-1">Event Code (EEE)</label>
+                        <select id="event-select" class="w-full bg-gray-900 border border-gray-600 p-2 rounded">
+                            <option value="RWT">RWT (Required Weekly Test)</option>
+                            <option value="RMT">RMT (Required Monthly Test)</option>
+                            <option value="TOR">TOR (Tornado Warning)</option>
+                            <option value="SVR">SVR (Severe Thunderstorm Warning)</option>
+                            <option value="FFW">FFW (Flash Flood Warning)</option>
+                            <option value="CAE">CAE (Child Abduction Emergency/Amber)</option>
+                            <option value="EVI">EVI (Evacuation Immediate)</option>
+                            <option value="CDW">CDW (Civil Danger Warning)</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="mb-4">
+                    <label class="block text-xs text-gray-400 mb-1">Locations (PSSCCC)</label>
+                    <input type="text" id="location-input" value="000000" class="w-full bg-gray-900 border border-gray-600 p-2 rounded font-mono" placeholder="001001, 001003 (FIPS Codes)">
+                    <div class="text-xs text-gray-500 mt-1">Use 000000 for All US, or comma separated FIPS.</div>
+                </div>
+
+                <div class="mb-4">
+                    <label class="block text-xs text-gray-400 mb-1">Duration (HHMM)</label>
+                    <select id="duration-select" class="w-full bg-gray-900 border border-gray-600 p-2 rounded">
+                        <option value="0015">15 Minutes</option>
+                        <option value="0030">30 Minutes</option>
+                        <option value="0100">1 Hour</option>
+                        <option value="0200">2 Hours</option>
+                        <option value="0600">6 Hours</option>
+                    </select>
+                </div>
+
+                <div class="mb-4 flex-1 flex flex-col">
+                    <label class="block text-xs text-gray-400 mb-1">Message Text (TTS)</label>
+                    <textarea id="tts-input" class="w-full flex-1 bg-gray-900 border border-gray-600 p-2 rounded resize-none" placeholder="Enter the alert message here..."></textarea>
+                </div>
+
+                <div class="flex gap-2 mt-auto">
+                    <button onclick="previewAudio()" class="flex-1 bg-yellow-700 hover:bg-yellow-600 text-white py-2 rounded font-bold">Preview TTS</button>
+                    <button onclick="transmitAlert()" class="flex-1 bg-red-700 hover:bg-red-600 text-white py-2 rounded font-bold animate-pulse">TRANSMIT</button>
+                    <button onclick="stopAudio()" class="w-16 bg-gray-600 hover:bg-gray-500 text-white py-2 rounded font-bold" title="Emergency Stop">STOP</button>
+                </div>
+            </section>
+
+            <!-- Right Panel: Log & Monitor -->
+            <section class="w-1/3 bg-black border-4 border-gray-600 rounded p-2 flex flex-col relative">
+                <div class="absolute top-0 left-0 bg-gray-600 text-black text-xs px-2 font-bold">MONITOR</div>
+                <div id="log-display" class="flex-1 font-mono text-green-500 text-sm overflow-y-auto p-2 mt-4">
+                    > SYSTEM INITIALIZED...<br>
+                    > WAITING FOR INPUT...<br>
+                </div>
+                
+                <!-- Advanced Controls -->
+                <div class="mt-2 border-t border-gray-800 pt-2 flex flex-col gap-2">
+                    <div class="text-xs font-bold text-gray-400">LIVE ALERT FEED (NOAA / IPAWS)</div>
+                    <div class="flex gap-2">
+                        <input id="state-input" type="text" maxlength="2" placeholder="ST" class="w-12 bg-gray-900 border border-gray-600 text-center uppercase rounded text-sm" title="2-Letter State Code (e.g., TX, FL)">
+                        <button onclick="fetchRealAlerts()" class="flex-1 bg-blue-700 hover:bg-blue-600 text-white text-xs py-1 rounded font-bold">FETCH LIVE ALERTS</button>
+                    </div>
+                    <div class="grid grid-cols-2 gap-2 mt-1">
+                        <button onclick="fetchNOAA()" class="bg-gray-700 text-xs py-1 hover:bg-gray-600 rounded">Test: Weather</button>
+                        <button onclick="fetchIPAWS()" class="bg-gray-700 text-xs py-1 hover:bg-gray-600 rounded">Test: Amber/Civil</button>
+                    </div>
+                    <div class="flex items-center gap-2 mt-1">
+                        <input type="checkbox" id="amber-siren" class="w-4 h-4">
+                        <label for="amber-siren" class="text-xs">Force Amber Siren (High Attention)</label>
+                    </div>
+                </div>
+            </section>
+        </div>
+    </div>
+
+    <!-- DISPLAY UI (SCREEN) -->
+    <div id="display-ui" class="hidden absolute inset-0 flex flex-col font-sans">
+        <!-- DASDEC Style Blue Screen (Hidden by default) -->
+        <div id="dasdec-screen" class="hidden absolute inset-0 bg-[#000080] flex flex-col items-center justify-center text-white z-50 p-8 sm:p-16 text-center font-bold">
+            <!-- Header -->
+            <div class="w-full max-w-5xl mb-8 border-b-4 border-white pb-4">
+                <h1 class="text-5xl sm:text-7xl tracking-widest uppercase">Emergency Alert System</h1>
+            </div>
+            
+            <!-- Alert Content -->
+            <div class="flex-1 flex flex-col justify-center items-center w-full max-w-6xl space-y-8">
+                <h2 id="dasdec-title" class="text-4xl sm:text-6xl text-yellow-400 uppercase tracking-wide bg-black/30 px-6 py-2 rounded">
+                    Waiting for Alert...
+                </h2>
+                
+                <div id="dasdec-body" class="text-2xl sm:text-4xl leading-snug uppercase tracking-wide font-medium font-mono whitespace-pre-wrap">
+                    AWAITING ACTIVATION...
+                </div>
+            </div>
+
+            <!-- Footer -->
+            <div class="mt-8 pt-4 border-t-4 border-white w-full max-w-5xl">
+                <p class="text-2xl sm:text-3xl animate-pulse">DO NOT CHANGE CHANNELS</p>
+            </div>
+        </div>
+
+        <!-- Scrolling Ticker Overlay (For OBS usage without full screen) -->
+        <div id="ticker-container" class="hidden absolute bottom-10 left-0 right-0 bg-red-700 text-white border-y-4 border-white shadow-2xl z-50 h-20 flex items-center transform -skew-x-6 origin-bottom-left mx-4 opacity-95">
+            <div class="absolute inset-0 bg-gradient-to-r from-red-800 to-red-600 z-0"></div>
+            <div class="w-24 h-full bg-yellow-400 flex items-center justify-center z-10 mr-4 border-r-4 border-white">
+                 <svg class="w-10 h-10 text-red-700 animate-pulse" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" /></svg>
+            </div>
+            <div class="relative overflow-hidden flex-1 h-full flex items-center z-10">
+                <div id="ticker-text" class="whitespace-nowrap text-4xl font-bold uppercase tracking-widest drop-shadow-md" style="padding-left: 100%;">
+                    Waiting for alerts...
+                </div>
+            </div>
+        </div>
+        
+        <!-- Connection Status for Debug -->
+        <div id="display-status" class="absolute top-2 right-2 text-white/50 text-xs font-mono bg-black/50 px-2 py-1 rounded">
+            WAITING FOR SIGNAL...
+        </div>
+    </div>
+
+    <script>
+        // --- LOGIC ---
+        const channel = new BroadcastChannel('eas_channel');
+        let audioCtx;
+
+        function updateClock() {
+            const now = new Date();
+            if(document.getElementById('clock')) {
+                document.getElementById('clock').innerText = now.toLocaleTimeString();
+            }
+        }
+        setInterval(updateClock, 1000);
+
+        // --- SETUP ---
+        function startEndec() {
+            document.getElementById('setup-screen').classList.add('hidden');
+            document.getElementById('controller-ui').classList.remove('hidden');
+            initAudio();
+            log("Endec Mode Started");
+        }
+
+        function exitToSetup() {
+            stopAudio();
+            document.getElementById('controller-ui').classList.add('hidden');
+            document.getElementById('setup-screen').classList.remove('hidden');
+            log("Returned to Menu");
+        }
+
+        function openDisplayPopup() {
+            const url = new URL(window.location.href);
+            url.searchParams.set('mode', 'display');
+            if(document.getElementById('green-screen-toggle').checked) {
+                url.searchParams.set('green', 'true');
+            }
+            window.open(url.toString(), 'eas_display', 'width=1280,height=720,menubar=no,toolbar=no');
+            log("Display Window Requested");
+        }
+
+        // Auto-start check
+        window.addEventListener('DOMContentLoaded', () => {
+            const params = new URLSearchParams(window.location.search);
+            if (params.get('mode') === 'display') {
+                startDisplay();
+            }
+        });
+
+        function startDisplay() {
+            document.getElementById('setup-screen').classList.add('hidden');
+            document.getElementById('display-ui').classList.remove('hidden');
+            document.body.classList.add('display-mode-body');
+            
+            const params = new URLSearchParams(window.location.search);
+            const isGreen = params.get('green') === 'true' || document.getElementById('green-screen-toggle').checked;
+
+            if (isGreen) {
+                document.body.style.backgroundColor = "#00b140"; // Chroma Green
+            }
+
+            const statusEl = document.getElementById('display-status');
+            if(statusEl) statusEl.innerText = "DISPLAY ONLINE - WAITING FOR HEADERS";
+
+            // Visual Boot Sequence
+            const dasdec = document.getElementById('dasdec-screen');
+            const title = document.getElementById('dasdec-title');
+            const body = document.getElementById('dasdec-body');
+            
+            dasdec.classList.remove('hidden');
+            title.innerText = "DASDEC-II ENCODER/DECODER";
+            body.innerText = "SYSTEM INITIALIZATION...\n\nLINK ESTABLISHED.\nWAITING FOR ALERT DATA.";
+            
+            // If green screen mode, hide the full screen after boot so OBS sees through
+            // If not green screen (dedicated monitor), keep it up or show "Monitoring"
+            setTimeout(() => {
+                if(isGreen) {
+                    dasdec.classList.add('hidden');
+                } else {
+                    title.innerText = "SYSTEM MONITORING";
+                    body.innerText = "NO ACTIVE ALERTS\n\nSTATION ID: W-EAS-1\nCHANNEL: AUTO";
+                }
+            }, 3000);
+
+            // 1. BroadcastChannel
+            channel.onmessage = (event) => handleBroadcast(event.data);
+
+            // 2. LocalStorage Fallback
+            window.addEventListener('storage', (event) => {
+                if (event.key === 'eas_alert_data') {
+                    try {
+                        const data = JSON.parse(event.newValue);
+                        if(data) handleBroadcast(data);
+                    } catch(e) { console.error("Parse error", e); }
+                }
+            });
+            
+            // 3. Direct Message (PostMessage)
+            window.addEventListener('message', (event) => {
+                if(event.data && event.data.type) {
+                     handleBroadcast(event.data);
+                }
+            });
+        }
+
+        // --- AUDIO ENGINE ---
+        function initAudio() {
+            if (!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+        }
+
+        // Generate SAME Header Tones (FSK: 2083.3Hz Mark, 1562.5Hz Space)
+        // Rate: 520.83 bits per second
+        async function playSameHeaders(headerString) {
+            if (!audioCtx) initAudio();
+            if (audioCtx.state === 'suspended') await audioCtx.resume();
+
+            const baud = 520.83;
+            const bitDuration = 1 / baud;
+            const markFreq = 2083.3;
+            const spaceFreq = 1562.5;
+
+            // Preamble (0xAB) x 16 bytes usually, simplified here to a short burst
+            // Actual header needs to be byte encoded. 
+            // For this web sim, we will simulate the *sound* of the data burst 
+            // because precise bit-banging JS audio scheduling can be heavy.
+            // But let's try to generate actual FSK for a string to make it "actual".
+            
+            // Convert string to bytes
+            const encoder = new TextEncoder();
+            const data = encoder.encode(headerString);
+            
+            // Preamble 0xAB (10101011) repeated 16 times
+            const preamble = new Uint8Array(16).fill(0xAB); 
+            const fullData = new Uint8Array(preamble.length + data.length);
+            fullData.set(preamble);
+            fullData.set(data, preamble.length);
+
+            // We play the burst 3 times with 1 sec silence
+            for (let i = 0; i < 3; i++) {
+                await playFSKData(fullData, bitDuration, markFreq, spaceFreq);
+                await new Promise(r => setTimeout(r, 1000));
+            }
+        }
+
+        async function playFSKData(bytes, bitDuration, mark, space) {
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            
+            let currentTime = audioCtx.currentTime;
+            osc.start(currentTime);
+            
+            // Iterate bytes
+            for (let i = 0; i < bytes.length; i++) {
+                let byte = bytes[i];
+                // 8 bits per byte, LSB first usually for SAME? 
+                // Spec says: ASCII characters, 8 bits, no parity, 1 stop bit. LSB first.
+                for (let b = 0; b < 8; b++) {
+                    const bit = (byte >> b) & 1;
+                    const freq = bit ? mark : space;
+                    osc.frequency.setValueAtTime(freq, currentTime);
+                    currentTime += bitDuration;
+                }
+            }
+            
+            osc.stop(currentTime);
+            gain.gain.setValueAtTime(1, currentTime);
+            gain.gain.linearRampToValueAtTime(0, currentTime + 0.01); // Quick fade out
+            
+            // Wait for audio to finish
+            return new Promise(resolve => {
+                setTimeout(resolve, (currentTime - audioCtx.currentTime) * 1000);
+            });
+        }
+
+        async function playAttentionSignal() {
+            // Standard EAS Two Tone: 853 Hz and 960 Hz
+            const osc1 = audioCtx.createOscillator();
+            const osc2 = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            
+            osc1.type = 'sine';
+            osc2.type = 'sine';
+            osc1.frequency.value = 853;
+            osc2.frequency.value = 960;
+            
+            osc1.connect(gain);
+            osc2.connect(gain);
+            gain.connect(audioCtx.destination);
+            
+            gain.gain.value = 0.5;
+            
+            osc1.start();
+            osc2.start();
+            
+            return new Promise(resolve => {
+                setTimeout(() => {
+                    osc1.stop();
+                    osc2.stop();
+                    resolve();
+                }, 8000); // 8 seconds standard
+            });
+        }
+
+        async function playAmberSiren() {
+            // Distinctive Air Raid / Wail Siren for Amber Alert High Attention
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            
+            osc.type = 'square'; // Harsh sound
+            gain.gain.value = 0.2;
+            
+            const now = audioCtx.currentTime;
+            osc.start(now);
+            
+            // Fast "Yelp" style siren
+            const duration = 8;
+            const cycle = 0.3; // Fast cycle
+            
+            for (let t = 0; t < duration; t += cycle) {
+                osc.frequency.setValueAtTime(600, now + t);
+                osc.frequency.linearRampToValueAtTime(1500, now + t + (cycle/2));
+                osc.frequency.linearRampToValueAtTime(600, now + t + cycle);
+            }
+            
+            osc.stop(now + duration);
+            
+            return new Promise(resolve => {
+                setTimeout(resolve, duration * 1000);
+            });
+        }
+
+        let voices = [];
+        if ('speechSynthesis' in window) {
+            window.speechSynthesis.onvoiceschanged = () => {
+                voices = window.speechSynthesis.getVoices();
+            };
+        }
+
+        function speakText(text) {
+            return new Promise((resolve, reject) => {
+                if (!isPlaying && text !== document.getElementById('tts-input').value) {
+                     // If stopped during wait
+                     return resolve();
+                }
+
+                if ('speechSynthesis' in window) {
+                    // Refresh voices if empty
+                    if (voices.length === 0) voices = window.speechSynthesis.getVoices();
+
+                    const utterance = new SpeechSynthesisUtterance(text);
+                    // Try to find a good English voice
+                    const preferredVoice = voices.find(v => v.name.includes("Google US English")) || 
+                                           voices.find(v => v.lang === 'en-US') || 
+                                           voices[0];
+                    
+                    if (preferredVoice) utterance.voice = preferredVoice;
+                    
+                    utterance.rate = 0.85; // Slightly slower for dramatic effect
+                    utterance.pitch = 1.0;
+                    
+                    utterance.onend = () => {
+                        resolve();
+                    };
+                    utterance.onerror = (e) => {
+                        console.error("TTS Error", e);
+                        resolve(); // Resolve anyway to continue flow
+                    };
+                    
+                    window.speechSynthesis.speak(utterance);
+                } else {
+                    resolve();
+                }
+            });
+        }
+
+        async function playEOM() {
+             // End of Message: NNNN, 3 times
+             // NNNN is just text, but in SAME it's the burst "NNNN"
+             const headerString = "NNNN";
+             // Reuse SAME player
+             await playSameHeaders(headerString);
+        }
+
+        // --- ENDEC LOGIC ---
+        function getSameString() {
+            // Construct ZCZC-ORG-EEE-PSSCCC+TTTT-JJJHHMM-LLLLLL-
+            const org = document.getElementById('org-select').value;
+            const eee = document.getElementById('event-select').value;
+            const locs = document.getElementById('location-input').value.split(',').map(s => s.trim()).join('-');
+            const duration = document.getElementById('duration-select').value;
+            
+            // Julian Date
+            const now = new Date();
+            const start = new Date(now.getFullYear(), 0, 0);
+            const diff = now - start;
+            const oneDay = 1000 * 60 * 60 * 24;
+            const day = Math.floor(diff / oneDay);
+            const jjj = day.toString().padStart(3, '0');
+            const hh = now.getUTCHours().toString().padStart(2, '0');
+            const mm = now.getUTCMinutes().toString().padStart(2, '0');
+            
+            const station = "WEBEAS"; // Sender ID
+
+            return `ZCZC-${org}-${eee}-${locs}+${duration}-${jjj}${hh}${mm}-${station}-`;
+        }
+
+        function log(msg) {
+            const el = document.getElementById('log-display');
+            if(el) {
+                el.innerHTML += `> ${msg}<br>`;
+                el.scrollTop = el.scrollHeight;
+            }
+        }
+
+        let currentUtterance = null;
+        let isPlaying = false;
+        let displayWindowRef = null;
+
+        function openDisplayPopup() {
+            const url = new URL(window.location.href);
+            url.searchParams.set('mode', 'display');
+            if(document.getElementById('green-screen-toggle').checked) {
+                url.searchParams.set('green', 'true');
+            }
+            displayWindowRef = window.open(url.toString(), 'eas_display', 'width=1280,height=720,menubar=no,toolbar=no');
+            log("Display Window Requested");
+        }
+
+        async function previewAudio() {
+             const ttsText = document.getElementById('tts-input').value || "No message provided.";
+             log("PREVIEWING TEXT-TO-SPEECH...");
+             await speakText(ttsText);
+             log("PREVIEW COMPLETE.");
+        }
+
+        function stopAudio() {
+            if(audioCtx) audioCtx.suspend();
+            if(window.speechSynthesis) window.speechSynthesis.cancel();
+            isPlaying = false;
+            log("AUDIO STOPPED BY USER.");
+            
+            // Also stop display
+            const endMsg = { type: 'ALERT_END', timestamp: Date.now() };
+            channel.postMessage(endMsg);
+            localStorage.setItem('eas_alert_data', JSON.stringify(endMsg));
+            if(displayWindowRef && !displayWindowRef.closed) {
+                displayWindowRef.postMessage(endMsg, '*');
+            }
+
+            setTimeout(() => { if(audioCtx) audioCtx.resume(); }, 500); // Resume for next time
+        }
+
+        async function transmitAlert() {
+            if(isPlaying) return;
+            isPlaying = true;
+            
+            const sameStr = getSameString();
+            const ttsText = document.getElementById('tts-input').value || "No message provided.";
+            const isAmber = document.getElementById('event-select').value === 'CAE';
+            const forceSiren = document.getElementById('amber-siren').checked;
+
+            const alertData = {
+                type: 'ALERT_START',
+                text: ttsText,
+                event: document.getElementById('event-select').value,
+                header: sameStr,
+                timestamp: Date.now() // Force storage update
+            };
+
+            log(`TRANSMITTING HEADER: ${sameStr}`);
+            
+            // 1. Broadcast Channel
+            channel.postMessage(alertData); 
+            
+            // 2. Storage Fallback
+            localStorage.setItem('eas_alert_data', JSON.stringify(alertData)); 
+            
+            // 3. Direct Window Reference
+            if(displayWindowRef && !displayWindowRef.closed) {
+                displayWindowRef.postMessage(alertData, '*');
+            }
+
+            try {
+                // Audio Sequence
+                await playSameHeaders(sameStr);
+                log("HEADERS SENT.");
+                
+                if (isAmber || forceSiren) {
+                    log("PLAYING AMBER SIREN...");
+                    await playAmberSiren();
+                } else {
+                    log("PLAYING ATTENTION TONE...");
+                    await playAttentionSignal();
+                }
+
+                log("SPEAKING MESSAGE...");
+                await speakText(ttsText);
+                
+                log("SENDING EOM...");
+                await playEOM();
+            } catch (e) {
+                log("TRANSMISSION INTERRUPTED.");
+            }
+            
+            const endMsg = { type: 'ALERT_END', timestamp: Date.now() };
+            channel.postMessage(endMsg);
+            localStorage.setItem('eas_alert_data', JSON.stringify(endMsg));
+            
+            log("TRANSMISSION COMPLETE.");
+            isPlaying = false;
+        }
+
+        // Real Data Fetching (NWS API)
+        const nwsEventMap = {
+            'Tornado Warning': 'TOR',
+            'Severe Thunderstorm Warning': 'SVR',
+            'Flash Flood Warning': 'FFW',
+            'Flood Warning': 'FLW',
+            'Special Marine Warning': 'SMW',
+            'Blizzard Warning': 'BZW',
+            'High Wind Warning': 'HWW',
+            'Winter Storm Warning': 'WSW',
+            'Required Weekly Test': 'RWT',
+            'Required Monthly Test': 'RMT',
+            'Child Abduction Emergency': 'CAE',
+            'Civil Danger Warning': 'CDW',
+            'Civil Emergency Message': 'CEM',
+            'Shelter In Place Warning': 'SPW',
+            'Evacuation Immediate': 'EVI',
+            'Fire Warning': 'FRW'
+        };
+
+        async function fetchRealAlerts() {
+            const state = document.getElementById('state-input').value.trim().toUpperCase();
+            let url = 'https://api.weather.gov/alerts/active?limit=10';
+            
+            if (state && state.length === 2) {
+                log(`CONNECTING TO NWS API (AREA: ${state})...`);
+                url = `https://api.weather.gov/alerts/active?area=${state}`;
+            } else {
+                log("CONNECTING TO NWS API (NATIONAL)...");
+            }
+
+            try {
+                const response = await fetch(url);
+                if (!response.ok) throw new Error("API Network Error");
+                const data = await response.json();
+                
+                if (data.features && data.features.length > 0) {
+                    // Filter for actual warnings if possible, or take the first one
+                    // We prioritize specific severe events over advisories
+                    const priorityEvents = ['Tornado Warning', 'Severe Thunderstorm Warning', 'Flash Flood Warning', 'Child Abduction Emergency'];
+                    let alert = data.features.find(f => priorityEvents.includes(f.properties.event));
+                    
+                    // Fallback to first alert if no priority event found
+                    if (!alert) alert = data.features[0];
+
+                    const props = alert.properties;
+                    log(`RECEIVED: ${props.event} issued by ${props.senderName}`);
+
+                    // 1. Map Event Code
+                    const eventCode = nwsEventMap[props.event] || 'ADR'; // ADR = Admin Message as fallback
+                    
+                    // Check if the event code exists in our dropdown, if not, add it temporarily or use a generic
+                    const eventSelect = document.getElementById('event-select');
+                    let optionExists = false;
+                    for(let i=0; i<eventSelect.options.length; i++) {
+                        if(eventSelect.options[i].value === eventCode) optionExists = true;
+                    }
+                    if(!optionExists) {
+                        const opt = document.createElement('option');
+                        opt.value = eventCode;
+                        opt.text = `${eventCode} (${props.event})`;
+                        eventSelect.add(opt);
+                    }
+                    eventSelect.value = eventCode;
+
+                    // 2. Map ORG
+                    // NWS usually maps to WXR. CIV for Amber.
+                    if (props.event === 'Child Abduction Emergency') {
+                        document.getElementById('org-select').value = 'CIV';
+                        document.getElementById('amber-siren').checked = true;
+                    } else {
+                        document.getElementById('org-select').value = 'WXR';
+                        document.getElementById('amber-siren').checked = false;
+                    }
+
+                    // 3. Map Locations (FIPS)
+                    // NWS API returns SAME codes in properties.same (array)
+                    if (props.same && props.same.length > 0) {
+                        // Take first 5 to avoid overflow
+                        const fipsList = props.same.slice(0, 5).join(',');
+                        document.getElementById('location-input').value = fipsList;
+                    } else {
+                        document.getElementById('location-input').value = "000000";
+                    }
+
+                    // 4. Duration
+                    // Calculate difference between expires and sent
+                    const sent = new Date(props.sent);
+                    const expires = new Date(props.expires);
+                    const diffMs = expires - sent;
+                    const diffMins = Math.round(diffMs / 60000);
+                    
+                    // Find closest duration option or default
+                    let durationVal = "0015";
+                    if (diffMins >= 10 && diffMins < 45) durationVal = "0030";
+                    else if (diffMins >= 45 && diffMins < 90) durationVal = "0100";
+                    else if (diffMins >= 90 && diffMins < 180) durationVal = "0200";
+                    else if (diffMins >= 180) durationVal = "0600";
+                    document.getElementById('duration-select').value = durationVal;
+
+                    // 5. Message Text
+                    // Use 'description' or 'instruction' or clean up 'headline'
+                    // We prefer the 'headline' + 'description' but NWS descriptions are LONG.
+                    // Let's try to grab the headline and the first sentence of description.
+                    
+                    let ttsText = props.headline || "";
+                    if (props.description) {
+                         // Simple heuristic to get the first paragraph or so
+                         const parts = props.description.split('\n\n');
+                         if (parts.length > 0) ttsText += ". " + parts[0];
+                    }
+                    
+                    // Cleanup text for TTS
+                    ttsText = ttsText.replace(/\*/g, '').replace(/\n/g, ' ');
+                    document.getElementById('tts-input').value = ttsText.substring(0, 500); // Limit length
+
+                    log("ALERT DATA LOADED SUCCESSFULLY.");
+
+                } else {
+                    log("NO ACTIVE ALERTS FOUND FOR AREA.");
+                    alert("No active alerts found for the selected area.");
+                }
+
+            } catch (error) {
+                console.error(error);
+                log("ERROR FETCHING NWS DATA.");
+                alert("Could not fetch data from NWS API. Check console.");
+            }
+        }
+
+        // Mock Fetching (Legacy)
+        function fetchNOAA() {
+            log("SIMULATING NOAA WEATHER RADIO...");
+            setTimeout(() => {
+                const scenarios = [
+                    "THE NATIONAL WEATHER SERVICE IN HAS ISSUED A SEVERE THUNDERSTORM WARNING FOR...",
+                    "A TORNADO WARNING IS IN EFFECT FOR THE FOLLOWING COUNTIES...",
+                    "FLASH FLOOD WARNING FOR LOW LYING AREAS..."
+                ];
+                const msg = scenarios[Math.floor(Math.random() * scenarios.length)];
+                document.getElementById('tts-input').value = msg;
+                document.getElementById('org-select').value = "WXR";
+                document.getElementById('event-select').value = "SVR";
+                log("SIMULATED DATA RECEIVED.");
+            }, 500);
+        }
+        
+        function fetchIPAWS() {
+             log("SIMULATING IPAWS-OPEN...");
+             setTimeout(() => {
+                document.getElementById('tts-input').value = "AMBER ALERT. CALIFORNIA HIGHWAY PATROL HAS ISSUED A CHILD ABDUCTION EMERGENCY. SUSPECT VEHICLE WHITE VAN LICENSE PLATE 7XYZ123.";
+                document.getElementById('event-select').value = "CAE";
+                document.getElementById('org-select').value = "CIV";
+                document.getElementById('amber-siren').checked = true;
+                log("CAP PACKET PARSED. AMBER ALERT LOADED.");
+             }, 500);
+        }
+
+        // --- DISPLAY LOGIC ---
+        const eventTitles = {
+            'RWT': 'REQUIRED WEEKLY TEST',
+            'RMT': 'REQUIRED MONTHLY TEST',
+            'TOR': 'TORNADO WARNING',
+            'SVR': 'SEVERE THUNDERSTORM WARNING',
+            'FFW': 'FLASH FLOOD WARNING',
+            'CAE': 'CHILD ABDUCTION EMERGENCY',
+            'EVI': 'IMMEDIATE EVACUATION',
+            'CDW': 'CIVIL DANGER WARNING'
+        };
+
+        function handleBroadcast(data) {
+            // New DASDEC UI Elements
+            const screen = document.getElementById('dasdec-screen');
+            const dasdecTitle = document.getElementById('dasdec-title');
+            const dasdecBody = document.getElementById('dasdec-body');
+            
+            // Ticker Elements
+            const ticker = document.getElementById('ticker-container');
+            const tickerText = document.getElementById('ticker-text');
+
+            if (data.type === 'ALERT_START') {
+                const title = eventTitles[data.event] || 'EMERGENCY ALERT';
+                const msgText = data.text.toUpperCase();
+
+                // Update DASDEC Screen
+                if(screen) {
+                    screen.classList.remove('hidden');
+                    if(dasdecTitle) dasdecTitle.innerText = title;
+                    if(dasdecBody) dasdecBody.innerText = msgText;
+                }
+
+                // Update Ticker
+                if(ticker && tickerText) {
+                    ticker.classList.remove('hidden');
+                    tickerText.innerText = `*** ${title} *** ${msgText}      `.repeat(5);
+                    
+                    // Reset Animation
+                    tickerText.style.animation = 'none';
+                    tickerText.offsetHeight; // Trigger reflow
+                    tickerText.style.animation = 'scroll-left 45s linear infinite';
+                }
+                
+                if(document.getElementById('display-status')) {
+                    document.getElementById('display-status').innerText = "ALERT ACTIVE - DO NOT CLOSE";
+                    document.getElementById('display-status').classList.add('text-red-500');
+                }
+
+            } else if (data.type === 'ALERT_END') {
+                // Return to Standby Screen instead of just hidden
+                const params = new URLSearchParams(window.location.search);
+                const isGreen = params.get('green') === 'true' || document.getElementById('green-screen-toggle')?.checked;
+                
+                if(screen) {
+                    if (isGreen) {
+                        screen.classList.add('hidden');
+                    } else {
+                        // Dedicated monitor mode - keep screen up but idle
+                        screen.classList.remove('hidden');
+                        if(dasdecTitle) dasdecTitle.innerText = "SYSTEM MONITORING";
+                        if(dasdecBody) dasdecBody.innerText = "NO ACTIVE ALERTS\n\nSTATION ID: W-EAS-1\nCHANNEL: AUTO";
+                    }
+                }
+                
+                if(ticker) ticker.classList.add('hidden');
+                
+                if(document.getElementById('display-status')) {
+                    document.getElementById('display-status').innerText = "DISPLAY ONLINE - WAITING";
+                    document.getElementById('display-status').classList.remove('text-red-500');
+                }
+            }
+        }
+    </script>
+</body>
+</html>

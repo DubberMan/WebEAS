@@ -1,0 +1,16 @@
+{
+  "name": "WebEAS",
+  "version": "1.0.0",
+  "main": "index.html",
+  "window": {
+    "title": "EAS ENDEC (Open Source Edition)",
+    "icon": "icon.png",
+    "toolbar": false,
+    "resizable": true,
+    "width": 1024,
+    "height": 768,
+    "min_width": 800,
+    "min_height": 600
+  },
+  "chromium-args": "--disable-web-security --allow-running-insecure-content"
+}
